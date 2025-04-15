@@ -56,5 +56,16 @@
 <!-- <string>Bu uygulama, atık ayırma mekanizmasını kontrol etmek için Bluetooth cihazlarına bağlanır.</string> -->
 <!-- <key>NSLocationWhenInUseUsageDescription</key> -->
 <!-- <string>Bluetooth cihazlarını taramak için konumunuza erişim gerekebilir.</string> -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Yakındaki atık kutusunu bulmak ve bağlanmak için Bluetooth gereklidir.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Atık kutusuna komut göndermek için Bluetooth bağlantısı gereklidir.</string>
+<!-- Konum izni gerekebilir (iOS 13+) -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Yakındaki Bluetooth cihazlarını taramak için konumunuza erişim gerekebilir.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+ 	<string>Yakındaki Bluetooth cihazlarını taramak için konumunuza erişim gerekebilir.</string>
+ 	<key>NSLocationAlwaysUsageDescription</key>
+ 	<string>Yakındaki Bluetooth cihazlarını taramak için konumunuza erişim gerekebilir.</string>
 </dict>
 </plist>

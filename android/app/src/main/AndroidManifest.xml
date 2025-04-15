@@ -9,6 +9,21 @@
 <!-- Gerekirse -->
 <!-- <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" /> -->
 <!-- <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/> -->
+<!-- Temel Bluetooth İzni (API 30 ve altı için) -->
+<uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+<uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+
+<!-- BLE İzinleri (API 31 ve sonrası için) -->
+<!-- Tarama için: 'neverForLocation' flag'i önemlidir, kullanıcıya konum izni gerekmediğini belirtir -->
+<uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
+<uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+<!-- Konum İzni (API 29-30 için BLE taraması gerektirebilir, API 31+ için 'neverForLocation' ile gerekmez) -->
+<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="30"/>
+<uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" android:maxSdkVersion="30"/>
+
+<!-- Bluetooth özelliğini isteğe bağlı yap (önerilir) -->
+<uses-feature android:name="android.hardware.bluetooth_le" android:required="true"/>
 
 <!-- Kamera kullanımı için özellik bildirimi -->
 <uses-feature android:name="android.hardware.camera" android:required="true" />

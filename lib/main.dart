@@ -7,6 +7,8 @@ import 'package:camera/camera.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart';
+import 'dart:convert'; // utf8 için
 import 'package:image/image.dart'
     as img; // image paketini img ön ekiyle kullanacağız
 
@@ -46,7 +48,28 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+//-----------------------------------------------------
+//        _HomeScreenState SINIFININ TAMAMI
+//-----------------------------------------------------
 class _HomeScreenState extends State<HomeScreen> {
+  // BLE Değişkenleri
+  BluetoothDevice? _targetDevice; // Bağlanılacak ESP32 cihazı
+  BluetoothCharacteristic?
+  _writeCharacteristic; // Komut yazılacak karakteristik
+  StreamSubscription<BluetoothConnectionState>? _connectionStateSubscription;
+  bool _isConnecting = false;
+  bool _isConnected = false;
+
+  // ESP32'nizin BLE Servis ve Karakteristik UUID'leri (Bunları ESP32 kodunuzdan almanız GEREKİR)
+  // ** LÜTFEN BUNLARI KENDİ UUID'LERİNİZLE DEĞİŞTİRİN! **
+  final Guid _serviceUuid = Guid(
+    "4fafc201-1fb5-459e-8fcc-c5c9c331914b",
+  ); // ÖRNEK
+  final Guid _characteristicUuid = Guid(
+    "beb5483e-36e1-4688-b7f5-ea07361b26a8",
+  ); // ÖRNEK
+
+  // Kamera ve TFLite Değişkenleri
   CameraController? _cameraController;
   bool _isCameraInitialized = false;
   bool _isPermissionGranted = false;
@@ -56,10 +79,8 @@ class _HomeScreenState extends State<HomeScreen> {
       false; // Aynı anda birden fazla kare işlemeyi önlemek için
   Timer? _processingTimer; // Belirli aralıklarla işlem yapmak için (opsiyonel)
 
-  // Modelin giriş boyutları (MobileNetV1 224x224 bekler)
-  final int _inputSize = 224;
-  // Modelin quantize edilmiş olup olmadığı (bizimki quantize idi)
-  final bool _isQuantized = true;
+  final int _inputSize = 224; // Modelin giriş boyutları
+  final bool _isQuantized = true; // Modelin quantize olup olmadığı
 
   String _resultText = "Nesne bekleniyor...";
   String _bluetoothStatus = "Bluetooth: Bağlı Değil";
@@ -67,66 +88,62 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // Önce izinleri iste, sonra modeli yükle ve kamerayı başlat
     _requestPermissionsAndInitialize();
-    // Ekranın kapanmasını engelle
-    WakelockPlus.enable(); // Sınıf adı WakelockPlus oldu
+    WakelockPlus.enable();
     print("WakelockPlus etkinleştirildi.");
   }
 
   @override
   void dispose() {
-    _processingTimer?.cancel(); // Zamanlayıcıyı iptal et
-    _cameraController?.stopImageStream(); // Görüntü akışını durdur
+    WakelockPlus.disable();
+    print("WakelockPlus devre dışı bırakıldı.");
+    _processingTimer?.cancel();
+    _cameraController?.stopImageStream();
     _cameraController?.dispose();
     _interpreter?.close();
-    // Ekranın kapanmasına tekrar izin ver
-    WakelockPlus.disable(); // Sınıf adı WakelockPlus oldu
-    print("WakelockPlus devre dışı bırakıldı.");
-    // ... (dispose içindeki diğer kodlar) ...
+    _disconnect(); // Bağlantıyı kes
     super.dispose();
   }
 
   Future<void> _requestPermissionsAndInitialize() async {
     var cameraStatus = await Permission.camera.request();
+    var bleScanStatus = await Permission.bluetoothScan.request();
+    var bleConnectStatus = await Permission.bluetoothConnect.request();
+    var locationStatus =
+        await Permission.locationWhenInUse.request(); // Gerekebilir
+
     setState(() {
-      _isPermissionGranted = cameraStatus.isGranted;
+      _isPermissionGranted =
+          cameraStatus.isGranted &&
+          bleScanStatus.isGranted &&
+          bleConnectStatus.isGranted;
     });
 
     if (_isPermissionGranted) {
-      // İzin verildiyse ÖNCE modeli yükle
       await _loadModel();
-      // SONRA kamerayı başlat
       _initializeCamera();
+      _initBluetooth();
     } else {
-      print("Kamera izni verilmedi.");
+      print("Gerekli izinler verilmedi.");
       setState(() {
-        _resultText = "Kamera izni gerekli!";
+        _resultText = "Kamera ve Bluetooth izinleri gerekli!";
       });
     }
   }
 
-  // TFLite modelini ve etiketleri yükleyen fonksiyon
   Future<void> _loadModel() async {
     try {
-      // Interpreter'ı yükle
-      _interpreter = await Interpreter.fromAsset(
-        'assets/model.tflite',
-      ); // assets klasöründeki dosya adı
-
-      // Etiketleri yükle
-      final labelsData = await rootBundle.loadString(
-        'assets/labels.txt',
-      ); // assets klasöründeki dosya adı
+      _interpreter = await Interpreter.fromAsset('assets/model.tflite');
+      final labelsData = await rootBundle.loadString('assets/labels.txt');
       _labels =
           labelsData
               .split('\n')
               .map((label) => label.trim())
               .where((label) => label.isNotEmpty)
               .toList();
-
-      print('Model ve etiketler başarıyla yüklendi.');
-      print('Toplam etiket sayısı: ${_labels.length}');
+      print(
+        'Model ve etiketler başarıyla yüklendi. Etiket sayısı: ${_labels.length}',
+      );
     } catch (e) {
       print('Model veya etiketler yüklenirken hata oluştu: $e');
       setState(() {
@@ -137,7 +154,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   void _initializeCamera() {
     if (_cameras.isEmpty || _isCameraInitialized || _interpreter == null)
-      return; // Interpreter yüklenmediyse başlatma
+      return;
 
     final cameraDescription = _cameras[0];
     _cameraController = CameraController(
@@ -146,9 +163,8 @@ class _HomeScreenState extends State<HomeScreen> {
       enableAudio: false,
       imageFormatGroup:
           Platform.isAndroid
-              ? ImageFormatGroup
-                  .yuv420 // Android için YUV
-              : ImageFormatGroup.bgra8888, // iOS için BGRA
+              ? ImageFormatGroup.yuv420
+              : ImageFormatGroup.bgra8888,
     );
 
     _cameraController!
@@ -159,7 +175,6 @@ class _HomeScreenState extends State<HomeScreen> {
             _isCameraInitialized = true;
             _resultText = "Kameraya bir nesne gösterin";
           });
-          // Kamera başlatıldıktan SONRA görüntü akışını başlat
           _startImageStream();
         })
         .catchError((Object e) {
@@ -175,45 +190,51 @@ class _HomeScreenState extends State<HomeScreen> {
         });
   }
 
-  // Görüntü akışını başlatan fonksiyon (ESKİ VE BASİT HALİ)
   void _startImageStream() {
     _cameraController?.startImageStream((CameraImage cameraImage) {
       if (_isProcessing || _interpreter == null) return;
       _isProcessing = true;
-      _processCameraImage(cameraImage); // Görüntüyü işle
+      _processCameraImage(cameraImage);
     });
     print("Görüntü akışı başlatıldı.");
   }
 
-  // Kameradan gelen görüntüyü işleyen fonksiyon
   Future<void> _processCameraImage(CameraImage cameraImage) async {
-    if (_interpreter == null || !_isCameraInitialized)
-      return; // Kamera kontrolü eklendi
+    if (_interpreter == null || !_isCameraInitialized) return;
 
     try {
-      // Görüntüyü TFLite'ın beklediği Uint8List formatına dönüştür
-      var inputBytes = _convertCameraImage(cameraImage); // Değişken adı değişti
-
+      var inputBytes = _convertCameraImage(cameraImage);
       if (inputBytes != null) {
-        // Giriş ve çıkış tensörlerini hazırla
-        // Giriş: inputBytes zaten Uint8List [1, 224, 224, 3] şeklinde olmalı (quantize için)
-        // Çıkış şekli [1, EtiketSayısı]
+        // Etiket sayısı kontrolü
+        if (_labels.isEmpty) {
+          print("Hata: Etiket listesi boş!");
+          return;
+        }
+        // Çıkış tensör boyutunu kontrol et
+        int expectedOutputSize = _labels.length;
+        if (expectedOutputSize <= 0) {
+          print("Hata: Geçersiz etiket sayısı: $expectedOutputSize");
+          return;
+        }
+
         var output = List.filled(
-          1 * _labels.length,
+          1 * expectedOutputSize,
           0,
-        ).reshape([1, _labels.length]);
+        ).reshape([1, expectedOutputSize]);
 
-        // Modeli çalıştır
-        // Not: Eğer model Float32 bekliyorsa, inputBytes'ı Float32List'e çevirip normalize etmek gerekir.
         _interpreter!.run(inputBytes, output);
-
-        // Çıktıyı yorumla
         var results = output[0] as List<num>;
-
-        // En yüksek olasılıklı sonucu bul
         int bestIndex = -1;
         double highestProb = -1.0;
+
         for (int i = 0; i < results.length; i++) {
+          // Çıkış sınırlarını kontrol et
+          if (i >= expectedOutputSize) {
+            print(
+              "Hata: Sonuç indeksi ($i) etiket sayısını ($expectedOutputSize) aşıyor.",
+            );
+            break; // Döngüden çık
+          }
           double prob =
               _isQuantized
                   ? results[i].toDouble() / 255.0
@@ -224,91 +245,96 @@ class _HomeScreenState extends State<HomeScreen> {
           }
         }
 
-        // Sonucu güncelle
-        if (bestIndex != -1 && highestProb > 0.6) {
-          // Eşik değerini biraz artırdım (örn. %60)
+        if (bestIndex != -1 &&
+            bestIndex < _labels.length &&
+            highestProb > 0.6) {
+          // bestIndex kontrolü eklendi
+          String fullLabel = _labels[bestIndex];
+          String predictedLabel = fullLabel.split(' ').last;
+
           if (mounted) {
-            // Widget hala ağaçta mı kontrol et
             setState(() {
               _resultText =
-                  "${_labels[bestIndex]} (${(highestProb * 100).toStringAsFixed(1)}%)";
-              // ---- BURAYA BLUETOOTH KODU GELECEK ----
-              // sendBluetoothCommand(_labels[bestIndex]);
-              // --------------------------------------
+                  "$fullLabel (${(highestProb * 100).toStringAsFixed(1)}%)";
             });
+
+            int commandToSend = 0;
+            print("Tahmin Edilen Etiket: $predictedLabel");
+
+            if (predictedLabel == "kitab") {
+              commandToSend = 1;
+            } else if (predictedLabel == "sise") {
+              commandToSend = 3;
+            } // Plastik varsayımı
+            else if (predictedLabel == "fare") {
+              commandToSend = 4;
+            } // Metal varsayımı
+            // else if (predictedLabel == "insan") { commandToSend = 0; } // İnsan için komut göndermeyelim
+            // ... diğer etiketler ...
+
+            print("Gönderilecek Komut: $commandToSend");
+            if (commandToSend != 0) {
+              _sendBluetoothCommand(commandToSend);
+            }
           }
         }
-        // else { // İsteğe bağlı: düşük olasılıkta ne yapılacağı
-        //   if(mounted) {
-        //     setState(() { _resultText = "Tanımlanamadı"; });
-        //   }
-        // }
       }
     } catch (e, stacktrace) {
-      // Stacktrace'i de yakala
       print("Görüntü işlenirken hata: $e");
-      print("Stacktrace: $stacktrace"); // Hatanın nerede olduğunu görmek için
+      print("Stacktrace: $stacktrace");
     } finally {
-      // İşlemin bittiğini işaretle
       _isProcessing = false;
-      // ---- PERFORMANS İÇİN GECİKME ----
-      // Bir sonraki karenin hemen işlenmemesi için kısa bir bekleme ekle
-      // (await anahtar kelimesini unutmayın)
-      await Future.delayed(
-        const Duration(milliseconds: 50),
-      ); // 100ms bekle (bu süreyi artırıp azaltarak deneyebilirsiniz)
+      await Future.delayed(const Duration(milliseconds: 100));
     }
   }
 
-  // CameraImage'ı TFLite için uygun Uint8List formatına (224x224 RGB) dönüştüren fonksiyon
   Uint8List? _convertCameraImage(CameraImage cameraImage) {
     img.Image? image;
+    try {
+      if (Platform.isAndroid) {
+        if (cameraImage.format.group == ImageFormatGroup.yuv420) {
+          image = _convertYUV420(cameraImage);
+        } else {
+          print("Beklenmeyen Android formatı: ${cameraImage.format.group}");
+          return null;
+        }
+      } else if (Platform.isIOS) {
+        if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
+          image = _convertBGRA8888(cameraImage);
+        } else {
+          print("Beklenmeyen iOS formatı: ${cameraImage.format.group}");
+          return null;
+        }
+      } else {
+        return null;
+      }
 
-    if (Platform.isAndroid) {
-      if (cameraImage.format.group == ImageFormatGroup.yuv420) {
-        image = _convertYUV420(cameraImage);
-      } else {
-        print("Beklenmeyen Android formatı: ${cameraImage.format.group}");
-        return null;
+      if (image == null) return null;
+
+      var resizedImage = img.copyResize(
+        image,
+        width: _inputSize,
+        height: _inputSize,
+      );
+      var imageBytes = Uint8List(_inputSize * _inputSize * 3);
+      int pixelIndex = 0;
+      for (int y = 0; y < _inputSize; y++) {
+        for (int x = 0; x < _inputSize; x++) {
+          var pixel = resizedImage.getPixel(x, y);
+          imageBytes[pixelIndex++] = img.getRed(pixel).toInt();
+          imageBytes[pixelIndex++] = img.getGreen(pixel).toInt();
+          imageBytes[pixelIndex++] = img.getBlue(pixel).toInt();
+        }
       }
-    } else if (Platform.isIOS) {
-      if (cameraImage.format.group == ImageFormatGroup.bgra8888) {
-        image = _convertBGRA8888(cameraImage);
-      } else {
-        print("Beklenmeyen iOS formatı: ${cameraImage.format.group}");
-        return null;
-      }
-    } else {
+      return imageBytes;
+    } catch (e, stacktrace) {
+      print("Görüntü dönüştürme hatası: $e");
+      print("Stacktrace: $stacktrace");
       return null;
     }
-
-    if (image == null) return null;
-
-    var resizedImage = img.copyResize(
-      image,
-      width: _inputSize,
-      height: _inputSize,
-    );
-
-    // Manuel Döngü (Daha Güvenilir)
-    var imageBytes = Uint8List(_inputSize * _inputSize * 3);
-    int pixelIndex = 0;
-    for (int y = 0; y < _inputSize; y++) {
-      for (int x = 0; x < _inputSize; x++) {
-        var pixel = resizedImage.getPixel(x, y);
-        // ---- DÜZELTME ----
-        imageBytes[pixelIndex++] = img.getRed(pixel).toInt(); // Kırmızı
-        imageBytes[pixelIndex++] = img.getGreen(pixel).toInt(); // Yeşil
-        imageBytes[pixelIndex++] = img.getBlue(pixel).toInt(); // Mavi
-        // -----------------
-      }
-    }
-    return imageBytes;
   }
 
-  // YUV420 (Android) formatını RGB Image nesnesine dönüştürür
   img.Image _convertYUV420(CameraImage image) {
-    // ... (Fonksiyonun başlangıcı ve YUV okuma kısmı aynı)
     final int width = image.width;
     final int height = image.height;
     final int uvRowStride = image.planes[1].bytesPerRow;
@@ -318,114 +344,330 @@ class _HomeScreenState extends State<HomeScreen> {
     final vPlane = image.planes[2].bytes;
 
     img.Image rgbImage = img.Image(width, height);
-
     int yp = 0;
     for (int y = 0; y < height; y++) {
       int uvp = (y >> 1) * uvRowStride;
-      int u = 0; // Initialize u and v for safety
-      int v = 0;
+      int u = 0, v = 0;
       for (int x = 0; x < width; x++, yp++) {
         int uvIndex = uvp + (x >> 1) * uvPixelStride;
-
-        // Check plane lengths to avoid out of bounds errors if possible
         if (uvIndex >= uPlane.length || uvIndex >= vPlane.length) continue;
-
-        // Assuming NV21 or similar where U/V might be interleaved or in separate planes
-        // This part is highly dependent on the exact YUV format variant.
-        // Let's stick to a common approximation assuming separate planes or simple fetch
         try {
-          // Use plane indices 1 and 2 for U and V
           u = image.planes[1].bytes[uvIndex];
           v = image.planes[2].bytes[uvIndex];
         } catch (e) {
-          // Handle potential index out of bounds, especially at image edges
           print("Error accessing UV planes at index $uvIndex: $e");
-          continue; // Skip this pixel if UV data is inaccessible
+          continue;
         }
-
         int yValue = yPlane[yp] & 0xFF;
-
-        // YUV to RGB conversion
         int r = (yValue + (1.370705 * (v - 128))).toInt().clamp(0, 255);
         int g = (yValue - (0.337633 * (u - 128)) - (0.698001 * (v - 128)))
             .toInt()
             .clamp(0, 255);
         int b = (yValue + (1.732446 * (u - 128))).toInt().clamp(0, 255);
-
-        // ---- DÜZELTME ----
-        // setPixelRgb yerine setPixelRgba kullan (alpha = 255)
         rgbImage.setPixelRgba(x, y, r, g, b, 255);
-        // -----------------
       }
     }
     return rgbImage;
   }
 
-  // BGRA8888 (iOS) formatını RGB Image nesnesine dönüştürür
   img.Image _convertBGRA8888(CameraImage image) {
-    // ---- DÜZELTME ----
-    // İsimli parametreler yerine pozisyonel parametreler kullan
     return img.Image.fromBytes(
-      image.width, // 1. Argüman: width
-      image.height, // 2. Argüman: height
-      image.planes[0].bytes, // 3. Argüman: bytes (Uint8List List<int>'dir)
-      // format: img.Format.bgra, // Format genellikle otomatik algılanır, gerekirse eklenebilir
-      // rowStride: image.planes[0].bytesPerRow, // Gerekirse eklenebilir
+      image.width,
+      image.height,
+      image.planes[0].bytes,
     );
-    // -----------------
   }
 
-  // ---- BLUETOOTH FONKSİYONU (ŞİMDİLİK BOŞ) ----
-  // void sendBluetoothCommand(String label) {
-  //   // Tespit edilen etikete göre komut belirle
-  //   String command = "";
-  //   if (label.contains("bottle") || label.contains("plastic bag")) {
-  //      command = "SORT:PLASTIC";
-  //   } else if (label.contains("can") || label.contains("foil")) { // Alüminyum folyo vb.
-  //      command = "SORT:METAL";
-  //   } else if (label.contains("paper") || label.contains("carton") || label.contains("envelope")) {
-  //      command = "SORT:PAPER";
-  //   } else if (label.contains("glass")) { // Model glass bottle vb. tanıyorsa
-  //      command = "SORT:GLASS";
-  //   } // ... diğer eşleştirmeler ...
-  //
-  //   if (command.isNotEmpty) {
-  //     // Bluetooth üzerinden komutu gönder (bluetooth paketi eklenince implemente edilecek)
-  //     print("Bluetooth komutu gönderiliyor: $command");
-  //     // _bluetoothConnection?.output.add(ascii.encode('$command\r\n')); // Örnek
-  //   }
-  // }
-  // -------------------------------------------
+  // ------------- BLUETOOTH FONKSİYONLARI -------------
 
+  Future<void> _initBluetooth() async {
+    if (await FlutterBluePlus.isSupported == false) {
+      print("BLE is not supported by this device");
+      setState(() => _bluetoothStatus = "BLE Desteklenmiyor");
+      return;
+    }
+
+    FlutterBluePlus.adapterState.listen((BluetoothAdapterState state) {
+      print("BLE Adapter State: $state");
+      if (mounted) {
+        setState(
+          () => _bluetoothStatus = "BLE: ${state.toString().split('.')[1]}",
+        );
+        if (state == BluetoothAdapterState.on &&
+            !_isConnected &&
+            !_isConnecting) {
+          _scanAndConnect();
+        } else if (state == BluetoothAdapterState.off) {
+          _disconnect();
+        }
+      }
+    });
+
+    final connectedDevices = await FlutterBluePlus.connectedDevices;
+    for (BluetoothDevice d in connectedDevices) {
+      // ** KENDİ CİHAZ ADIN VEYA MAC ADRESİNLE DEĞİŞTİR **
+      if (d.platformName == "ESP32_TrashBin") {
+        print("Cihaz zaten bağlı: ${d.platformName}");
+        _targetDevice = d;
+        await _setupConnection(_targetDevice!);
+        return;
+      }
+    }
+
+    if (await FlutterBluePlus.adapterState.first == BluetoothAdapterState.on) {
+      _scanAndConnect();
+    }
+  }
+
+  Future<void> _setupConnection(BluetoothDevice device) async {
+    if (mounted) {
+      setState(() {
+        _isConnected = true;
+        _isConnecting = false;
+        _bluetoothStatus = "BLE: Önceden Bağlı";
+      });
+      _connectionStateSubscription?.cancel();
+      _connectionStateSubscription = device.connectionState.listen((
+        BluetoothConnectionState state,
+      ) {
+        if (mounted) {
+          setState(() {
+            _isConnected = state == BluetoothConnectionState.connected;
+            _bluetoothStatus =
+                _isConnected ? "BLE: Bağlandı" : "BLE: Bağlantı Kesildi";
+            _isConnecting = false;
+          });
+          if (!_isConnected) {
+            _writeCharacteristic = null;
+            // Future.delayed(const Duration(seconds: 5), () { if(mounted) _scanAndConnect(); }); // Otomatik tekrar bağlanma
+          }
+        }
+      });
+      await _discoverServices(device);
+    }
+  }
+
+  Future<void> _scanAndConnect() async {
+    if (_isConnecting || _isConnected) return;
+    setState(() {
+      _isConnecting = true;
+      _bluetoothStatus = "BLE: Cihaz Aranıyor...";
+    });
+
+    try {
+      await FlutterBluePlus.startScan(timeout: const Duration(seconds: 5));
+
+      StreamSubscription? scanSubscription; // Dinleyiciyi tutmak için
+      scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+        for (ScanResult r in results) {
+          // ** KENDİ CİHAZ ADINLA DEĞİŞTİR **
+          if (r.device.platformName == "ESP32_TrashBin") {
+            print(
+              'Hedef Cihaz Bulundu: ${r.device.platformName} (${r.device.remoteId})',
+            );
+            FlutterBluePlus.stopScan(); // Taramayı durdur
+            scanSubscription?.cancel(); // Dinleyiciyi iptal et
+            _targetDevice = r.device;
+            _connectToDevice(_targetDevice!); // Bağlanmayı başlat
+            return; // Fonksiyondan çık
+          }
+        }
+      });
+
+      // Tarama zaman aşımına uğradığında veya durduğunda dinleyiciyi iptal et
+      await FlutterBluePlus.isScanning.where((val) => val == false).first;
+      scanSubscription?.cancel(); // Tarama bittiğinde dinleyiciyi temizle
+
+      // Zaman aşımı sonrası kontrol
+      await Future.delayed(const Duration(milliseconds: 100)); // Kısa bekleme
+      if (!_isConnected && _targetDevice == null && mounted) {
+        print("Hedef cihaz bulunamadı.");
+        setState(() {
+          _bluetoothStatus = "BLE: Cihaz Bulunamadı";
+          _isConnecting = false;
+        });
+      }
+    } catch (e) {
+      print("Tarama sırasında hata: $e");
+      if (mounted) {
+        setState(() {
+          _bluetoothStatus = "BLE: Tarama Hatası";
+          _isConnecting = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _connectToDevice(BluetoothDevice device) async {
+    if (_isConnected) return;
+    setState(() => _bluetoothStatus = "BLE: Bağlanılıyor...");
+
+    _connectionStateSubscription?.cancel(); // Önceki dinleyiciyi iptal et
+    _connectionStateSubscription = device.connectionState.listen(
+      (BluetoothConnectionState state) {
+        if (mounted) {
+          setState(() {
+            _isConnected = state == BluetoothConnectionState.connected;
+            _bluetoothStatus =
+                _isConnected ? "BLE: Bağlandı" : "BLE: Bağlantı Kesildi";
+            _isConnecting = false;
+          });
+          if (_isConnected) {
+            _discoverServices(device);
+          } else {
+            _writeCharacteristic = null;
+            // Tekrar bağlanmayı dene?
+            // Future.delayed(const Duration(seconds: 5), () { if(mounted && !_isConnecting) _scanAndConnect(); });
+          }
+        }
+      },
+      onError: (error) {
+        // Hata durumunu da dinle
+        print("Bağlantı durumu hatası: $error");
+        if (mounted) {
+          setState(() {
+            _isConnected = false;
+            _isConnecting = false;
+            _bluetoothStatus = "BLE: Bağlantı Hatası";
+          });
+        }
+      },
+    );
+
+    try {
+      await device.connect(timeout: Duration(seconds: 15)); // Zaman aşımı ekle
+    } catch (e) {
+      print("Bağlanma hatası: $e");
+      if (mounted) {
+        setState(() {
+          _bluetoothStatus = "BLE: Bağlantı Hatası";
+          _isConnecting = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _discoverServices(BluetoothDevice device) async {
+    if (!_isConnected) return;
+    setState(() => _bluetoothStatus = "BLE: Servisler Keşfediliyor...");
+    try {
+      List<BluetoothService> services = await device.discoverServices();
+      bool characteristicFound = false; // Karakteristik bulundu mu flag'i
+      for (BluetoothService service in services) {
+        if (service.uuid == _serviceUuid) {
+          print("Hedef Servis Bulundu: ${service.uuid}");
+          for (BluetoothCharacteristic characteristic
+              in service.characteristics) {
+            if (characteristic.uuid == _characteristicUuid &&
+                (characteristic.properties.write ||
+                    characteristic.properties.writeWithoutResponse)) {
+              // Yazma özelliğini kontrol et
+              print("Hedef Karakteristik Bulundu: ${characteristic.uuid}");
+              if (mounted) {
+                setState(() {
+                  _writeCharacteristic = characteristic;
+                  _bluetoothStatus = "BLE: Hazır";
+                });
+              }
+              characteristicFound = true;
+              break; // İç döngüden çık
+            }
+          }
+        }
+        if (characteristicFound) break; // Dış döngüden de çık
+      }
+      if (!characteristicFound && mounted) {
+        print("Hedef servis veya yazılabilir karakteristik bulunamadı.");
+        setState(() => _bluetoothStatus = "BLE: Karakteristik Bulunamadı");
+      }
+    } catch (e) {
+      print("Servis keşfi sırasında hata: $e");
+      if (mounted)
+        setState(() => _bluetoothStatus = "BLE: Servis Keşfi Hatası");
+    }
+  }
+
+  Future<void> _sendBluetoothCommand(int commandValue) async {
+    if (_writeCharacteristic != null && _isConnected) {
+      try {
+        List<int> bytesToSend = [commandValue];
+        // Yazma türünü kontrol et (withoutResponse daha hızlıdır)
+        bool canWriteWithoutResponse =
+            _writeCharacteristic!.properties.writeWithoutResponse;
+        await _writeCharacteristic!.write(
+          bytesToSend,
+          withoutResponse: canWriteWithoutResponse,
+        );
+        print(
+          "BLE Komutu Gönderildi: $commandValue (withoutResponse: $canWriteWithoutResponse)",
+        );
+      } catch (e) {
+        print("BLE komutu gönderilirken hata: $e");
+        if (mounted) setState(() => _bluetoothStatus = "BLE: Yazma Hatası");
+      }
+    } else {
+      print(
+        "BLE komutu gönderilemedi: Bağlı değil veya karakteristik bulunamadı.",
+      );
+      if (!_isConnected && !_isConnecting && mounted) {
+        _scanAndConnect(); // Bağlı değilse tekrar bağlanmayı dene
+      }
+    }
+  }
+
+  Future<void> _disconnect() async {
+    _connectionStateSubscription?.cancel();
+    _connectionStateSubscription = null;
+    try {
+      await _targetDevice?.disconnect();
+    } catch (e) {
+      print("Disconnect hatası: $e");
+    }
+    if (mounted) {
+      setState(() {
+        _isConnected = false;
+        _isConnecting = false;
+        _writeCharacteristic = null;
+        _targetDevice = null; // Cihazı null yapalım ki tekrar tarasın
+        _bluetoothStatus = "BLE: Bağlantı Kesildi";
+      });
+    }
+    print("BLE Bağlantısı kesildi.");
+  }
+
+  // ------------- BUILD METODU -------------
   @override
   Widget build(BuildContext context) {
+    // Yükleme veya izin ekranı
     if (!_isPermissionGranted ||
         !_isCameraInitialized ||
         _cameraController == null ||
         _interpreter == null) {
-      // Interpreter kontrolü eklendi
       return Scaffold(
         appBar: AppBar(title: const Text('Akıllı Göz')),
         body: Center(
           child:
               _isPermissionGranted
                   ? const Column(
-                    // Model yüklenirken de gösterge
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       CircularProgressIndicator(),
                       SizedBox(height: 10),
-                      Text("Model yükleniyor veya kamera başlatılıyor..."),
+                      Text("Başlatılıyor..."),
                     ],
                   )
-                  : const Text(
-                    'Lütfen uygulama ayarlarından kamera iznini verin.',
-                    textAlign: TextAlign.center,
+                  : const Padding(
+                    padding: EdgeInsets.all(16.0),
+                    child: Text(
+                      'Uygulamayı kullanmak için lütfen Kamera ve Bluetooth izinlerini verin.',
+                      textAlign: TextAlign.center,
+                    ),
                   ),
         ),
       );
     }
 
+    // Kamera önizleme oranı ayarı
     final scale =
         1 /
         (_cameraController!.value.aspectRatio *
@@ -436,6 +678,7 @@ class _HomeScreenState extends State<HomeScreen> {
       child: CameraPreview(_cameraController!),
     );
 
+    // Ana ekran yapısı
     return Scaffold(
       appBar: AppBar(title: const Text('Akıllı Göz: Geri Dönüşüm Asistanı')),
       body: Column(
@@ -470,4 +713,8 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
-}
+} // <- BU SATIRIN SONUNDA EKSİK OLAN KAPANIŞ PARANTEZİ '}'
+
+//-----------------------------------------------------
+//     _HomeScreenState SINIFININ SONU
+//-----------------------------------------------------
