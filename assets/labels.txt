@@ -1,0 +1,4 @@
+0 sise
+1 fare
+2 kitab
+3 insan
